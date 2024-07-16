@@ -1,49 +1,73 @@
 import streamlit as st
 from scapy.all import ARP, Ether, srp
-import socket
+import socket, os
 import pandas as pd
 import asyncio
-import time, os
 from datetime import datetime
 import requests
+import ipaddress
 
 # Inicializar el estado de la sesión
 if 'devices' not in st.session_state:
     st.session_state.devices = set()
 if 'alerts' not in st.session_state:
     st.session_state.alerts = []
+if 'progress' not in st.session_state:
+    st.session_state.progress = 0
+if 'ip_count' not in st.session_state:
+    st.session_state.ip_count = 0
 
 # Configuración de Gotify
 GOTIFY_URL = os.environ.get("GOTIFY_URL")
 GOTIFY_TOKEN = os.environ.get("GOTIFY_TOKEN")
 
 def send_gotify_notification(message):
-    url = f"{GOTIFY_URL}/message"
-    headers = {
-        "X-Gotify-Key": GOTIFY_TOKEN
-    }
-    data = {
-        "message": message,
-        "title": "Nueva IP Detectada",
-        "priority": 5
-    }
+    if GOTIFY_URL and GOTIFY_TOKEN:
+        url = f"{GOTIFY_URL}/message"
+        headers = {"X-Gotify-Key": GOTIFY_TOKEN}
+        data = {
+            "message": message,
+            "title": "Nueva IP Detectada",
+            "priority": 5
+        }
+        try:
+            response = requests.post(url, json=data, headers=headers)
+            response.raise_for_status()
+            st.success("Notificación enviada a Gotify")
+        except requests.RequestException as e:
+            st.error(f"Error al enviar notificación a Gotify: {e}")
+    else:
+        st.warning("Gotify no está configurado. Omitiendo notificación.")
+
+def get_local_ip_range():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(("8.8.8.8", 80))
+    local_ip = s.getsockname()[0]
+    s.close()
+    ip_network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
+    return str(ip_network)
+
+async def ping_ip(ip):
     try:
-        response = requests.post(url, json=data, headers=headers)
-        response.raise_for_status()
-        st.success("Notificación enviada a Gotify")
-    except requests.RequestException as e:
-        st.error(f"Error al enviar notificación a Gotify: {e}")
+        await aioping.ping(ip, timeout=0.5)
+        return ip
+    except TimeoutError:
+        return None
 
 async def scan_network(ip_range):
-    arp = ARP(pdst=ip_range)
-    ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-    packet = ether/arp
+    ip_network = ipaddress.ip_network(ip_range)
+    total_ips = ip_network.num_addresses - 2  # Excluir la dirección de red y broadcast
+    progress_bar = st.progress(0)
+    ip_count_placeholder = st.empty()
 
-    result = await asyncio.get_event_loop().run_in_executor(None, lambda: srp(packet, timeout=3, verbose=0)[0])
+    tasks = [ping_ip(str(ip)) for ip in ip_network.hosts()]
+    results = await asyncio.gather(*tasks)
 
-    devices = []
-    for sent, received in result:
-        devices.append({'ip': received.psrc, 'mac': received.hwsrc})
+    devices = [{'ip': ip} for ip in results if ip is not None]
+    st.session_state.progress = 1
+    st.session_state.ip_count = len(devices)
+    progress_bar.progress(st.session_state.progress)
+    ip_count_placeholder.text(f"IPs encontradas: {st.session_state.ip_count}")
 
     return devices
 
@@ -57,18 +81,26 @@ async def get_device_info(ip):
     open_ports = []
     for port in [80, 443, 22, 21]:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(0.1)
-            result = await asyncio.get_event_loop().run_in_executor(None, sock.connect_ex, (ip, port))
-            if result == 0:
-                open_ports.append(port)
-            sock.close()
-        except:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=0.5)
+            open_ports.append(port)
+            writer.close()
+            await writer.wait_closed()
+        except (asyncio.TimeoutError, ConnectionRefusedError):
             pass
 
     return hostname, open_ports
 
-async def periodic_scan(ip_range):
+async def get_mac_address(ip):
+    arp = ARP(pdst=ip)
+    ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+    packet = ether/arp
+    result = await asyncio.get_event_loop().run_in_executor(None, lambda: srp(packet, timeout=1, verbose=0)[0])
+    if result:
+        return result[0][1].hwsrc
+    return "Desconocido"
+
+async def periodic_scan():
+    ip_range = get_local_ip_range()
     while True:
         devices = await scan_network(ip_range)
         current_devices = set(device['ip'] for device in devices)
@@ -82,13 +114,16 @@ async def periodic_scan(ip_range):
         
         st.session_state.devices = current_devices
 
+        tasks = [asyncio.create_task(get_device_info(device['ip'])) for device in devices]
+        mac_tasks = [asyncio.create_task(get_mac_address(device['ip'])) for device in devices]
+        
+        infos = await asyncio.gather(*tasks)
+        macs = await asyncio.gather(*mac_tasks)
+
         data = []
-        for device in devices:
-            ip = device['ip']
-            mac = device['mac']
-            hostname, open_ports = await get_device_info(ip)
+        for device, (hostname, open_ports), mac in zip(devices, infos, macs):
             data.append({
-                'IP': ip,
+                'IP': device['ip'],
                 'MAC': mac,
                 'Hostname': hostname,
                 'Puertos Abiertos': ', '.join(map(str, open_ports)) if open_ports else 'Ninguno'
@@ -101,24 +136,29 @@ async def periodic_scan(ip_range):
 def main():
     st.title("Escáner de Red LAN")
 
-    ip_range = st.text_input("Introduce el rango de IP a escanear (ej. 192.168.1.0/24):")
-
     if 'scan_task' not in st.session_state:
         st.session_state.scan_task = None
+
+    ip_range = get_local_ip_range()
+    st.write(f"Rango de IP local detectado: {ip_range}")
 
     if st.button("Iniciar/Detener Escaneo"):
         if st.session_state.scan_task is None:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            st.session_state.scan_task = loop.create_task(periodic_scan(ip_range))
+            st.session_state.scan_task = loop.create_task(periodic_scan())
             st.success("Escaneo iniciado.")
         else:
             st.session_state.scan_task.cancel()
             st.session_state.scan_task = None
+            st.session_state.progress = 0
+            st.session_state.ip_count = 0
             st.success("Escaneo detenido.")
 
     if st.session_state.scan_task is not None:
         st.write("Estado: Escaneando...")
+        st.progress(st.session_state.progress)
+        st.write(f"IPs encontradas: {st.session_state.ip_count}")
     else:
         st.write("Estado: Detenido")
 
