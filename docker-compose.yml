@@ -12,3 +12,4 @@ services:
       - NET_ADMIN  # Esto da al contenedor los permisos necesarios para el escaneo de red
     environment:
       - STREAMLIT_SERVER_PORT=8501
+    restart: always
