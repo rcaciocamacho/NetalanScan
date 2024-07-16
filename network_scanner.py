@@ -21,19 +21,18 @@ if 'ip_count' not in st.session_state:
 GOTIFY_URL = os.environ.get("GOTIFY_URL")
 GOTIFY_TOKEN = os.environ.get("GOTIFY_TOKEN")
 
-def send_gotify_notification(message):
+def send_gotify_notification(title, message):
     if GOTIFY_URL and GOTIFY_TOKEN:
         url = f"{GOTIFY_URL}/message"
         headers = {"X-Gotify-Key": GOTIFY_TOKEN}
         data = {
             "message": message,
-            "title": "Nueva IP Detectada",
+            "title": title,
             "priority": 5
         }
         try:
             response = requests.post(url, json=data, headers=headers)
             response.raise_for_status()
-            st.success("Notificación enviada a Gotify")
         except requests.RequestException as e:
             st.error(f"Error al enviar notificación a Gotify: {e}")
     else:
@@ -110,7 +109,7 @@ async def periodic_scan():
             for ip in new_devices:
                 alert_message = f"Nueva IP detectada: {ip} en {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 st.session_state.alerts.append(alert_message)
-                send_gotify_notification(alert_message)
+                send_gotify_notification("Nueva IP Detectada", alert_message)
         
         st.session_state.devices = current_devices
 
@@ -148,12 +147,14 @@ def main():
             asyncio.set_event_loop(loop)
             st.session_state.scan_task = loop.create_task(periodic_scan())
             st.success("Escaneo iniciado.")
+            send_gotify_notification("NetalanScan", f"Escaneo iniciado!! DateTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         else:
             st.session_state.scan_task.cancel()
             st.session_state.scan_task = None
             st.session_state.progress = 0
             st.session_state.ip_count = 0
             st.success("Escaneo detenido.")
+            send_gotify_notification("NetalanScan", f"Escaneo detenido!! DateTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     if st.session_state.scan_task is not None:
         st.write("Estado: Escaneando...")

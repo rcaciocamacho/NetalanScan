@@ -12,6 +12,6 @@ services:
       - NET_ADMIN  # Esto da al contenedor los permisos necesarios para el escaneo de red
     environment:
       - STREAMLIT_SERVER_PORT=8511
-      - GOTIFY_URL="http://10.147.18.244:8081"
-      - GOTIFY_TOKEN="AzIxP3wfZCLnTD1"
+      - GOTIFY_URL=http://10.147.18.244:8081
+      - GOTIFY_TOKEN=AzIxP3wfZCLnTD1
     restart: always
