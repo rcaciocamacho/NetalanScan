@@ -7,6 +7,9 @@ from datetime import datetime
 import requests
 import ipaddress
 import aioping
+import nest_asyncio
+
+nest_asyncio.apply()
 
 # Inicializar el estado de la sesión
 if 'devices' not in st.session_state:
@@ -52,17 +55,23 @@ def get_local_ip_range():
     ip_network = ipaddress.ip_network(f"{local_ip}/24", strict=False)
     return str(ip_network)
 
-async def ping_ip(ip, total_ips):
+async def ping_ip(ip, total_ips, progress_bar, ip_count_placeholder, ip_list_placeholder):
     try:
         await aioping.ping(str(ip), timeout=0.5)
         st.session_state.ip_count += 1
         st.session_state.progress = st.session_state.ip_count / total_ips
         st.session_state.data.append({'IP': str(ip), 'MAC': 'Pendiente', 'Hostname': 'Pendiente', 'Puertos Abiertos': 'Pendiente'})
+        
+        # Actualizar la interfaz
+        progress_bar.progress(st.session_state.progress)
+        ip_count_placeholder.text(f"IPs encontradas: {st.session_state.ip_count}")
+        ip_list_placeholder.dataframe(pd.DataFrame(st.session_state.data))
+        
         return str(ip)
     except TimeoutError:
         return None
 
-async def scan_network(ip_range):
+async def scan_network(ip_range, progress_bar, ip_count_placeholder, ip_list_placeholder):
     ip_network = ipaddress.ip_network(ip_range)
     total_ips = ip_network.num_addresses - 2  # Excluir la dirección de red y broadcast
 
@@ -70,7 +79,7 @@ async def scan_network(ip_range):
     st.session_state.ip_count = 0
     st.session_state.data = []
 
-    tasks = [ping_ip(ip, total_ips) for ip in ip_network.hosts()]
+    tasks = [ping_ip(ip, total_ips, progress_bar, ip_count_placeholder, ip_list_placeholder) for ip in ip_network.hosts()]
     results = await asyncio.gather(*tasks)
 
     devices = [{'ip': ip} for ip in results if ip is not None]
@@ -104,10 +113,10 @@ async def get_mac_address(ip):
         return result[0][1].hwsrc
     return "Desconocido"
 
-async def periodic_scan():
+async def periodic_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
     ip_range = get_local_ip_range()
     while True:
-        devices = await scan_network(ip_range)
+        devices = await scan_network(ip_range, progress_bar, ip_count_placeholder, ip_list_placeholder)
         current_devices = set(device['ip'] for device in devices)
         
         new_devices = current_devices - st.session_state.devices
@@ -136,19 +145,25 @@ async def periodic_scan():
         
         st.session_state.data = data
         
+        # Actualizar la interfaz
+        ip_list_placeholder.dataframe(pd.DataFrame(st.session_state.data))
+        
         await asyncio.sleep(300)  # Esperar 5 minutos
 
-def main():
+async def main():
     st.title("NetalanScan - Escáner de Red LAN")
 
     ip_range = get_local_ip_range()
     st.write(f"Rango de IP local detectado: {ip_range}")
 
+    progress_bar = st.progress(0)
+    ip_count_placeholder = st.empty()
+    ip_list_placeholder = st.empty()
+
     if st.button("Iniciar/Detener Escaneo"):
         if st.session_state.scan_task is None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            st.session_state.scan_task = loop.create_task(periodic_scan())
+            loop = asyncio.get_event_loop()
+            st.session_state.scan_task = loop.create_task(periodic_scan(progress_bar, ip_count_placeholder, ip_list_placeholder))
             st.success("Escaneo iniciado.")
             send_gotify_notification("NetalanScan", f"Iniciando escaneo!! DateTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         else:
@@ -161,9 +176,6 @@ def main():
 
     if st.session_state.scan_task is not None:
         st.write("Estado: Escaneando...")
-        # Mostrar progreso
-        st.progress(st.session_state.progress)
-        st.write(f"IPs encontradas: {st.session_state.ip_count}")
     else:
         st.write("Estado: Detenido")
 
@@ -171,10 +183,11 @@ def main():
     for alert in st.session_state.alerts:
         st.warning(alert)
 
-    # La tabla de dispositivos se actualizará automáticamente en la función ping_ip
+    # La tabla de dispositivos se actualizará automáticamente en la función periodic_scan
     if st.session_state.data:
         st.write("Dispositivos detectados:")
-        st.dataframe(pd.DataFrame(st.session_state.data))
+        ip_list_placeholder.dataframe(pd.DataFrame(st.session_state.data))
 
+# Ejecutar la función principal
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

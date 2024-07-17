@@ -3,3 +3,6 @@ scapy
 pandas
 requests
 aioping
+streamlit_analytics
+nest_asyncio
+python-nmap
