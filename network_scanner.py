@@ -9,6 +9,7 @@ import ipaddress
 import aioping
 import nest_asyncio
 import csv
+import uuid
 
 nest_asyncio.apply()
 
@@ -75,7 +76,10 @@ async def ping_ip(ip, total_ips):
         await aioping.ping(str(ip), timeout=0.5)
         st.session_state.ip_count += 1
         st.session_state.progress = st.session_state.ip_count / total_ips
-        st.session_state.data.append({'IP': str(ip), 'MAC': 'Pendiente', 'Hostname': 'Pendiente', 'Puertos Abiertos': 'Pendiente'})
+        unique_id = str(uuid.uuid4())
+        if ip not in st.session_state.devices:
+            st.session_state.data.append({'IP': str(ip), 'MAC': 'Pendiente', 'Hostname': 'Pendiente', 'Puertos Abiertos': 'Pendiente', 'unique_id': unique_id})
+            st.session_state.devices.add(ip)
         return str(ip)
     except TimeoutError:
         return None
@@ -145,15 +149,18 @@ async def periodic_scan():
 
         data = []
         for idx, (device, (hostname, open_ports), mac) in enumerate(zip(devices, infos, macs)):
-            data.append({
-                'IP': device['ip'],
-                'MAC': mac,
-                'Hostname': hostname,
-                'Puertos Abiertos': ', '.join(map(str, open_ports)) if open_ports else 'Ninguno',
-                'id': idx
-            })
+            unique_id = str(uuid.uuid4())
+            if device['ip'] not in st.session_state.devices:
+                data.append({
+                    'IP': device['ip'],
+                    'MAC': mac,
+                    'Hostname': hostname,
+                    'Puertos Abiertos': ', '.join(map(str, open_ports)) if open_ports else 'Ninguno',
+                    'unique_id': f"{unique_id}_{idx}"
+                })
+                st.session_state.devices.add(device['ip'])
         
-        st.session_state.data = data
+        st.session_state.data.extend(data)
         
         await asyncio.sleep(300)  # Esperar 5 minutos
 
@@ -162,6 +169,7 @@ def start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(periodic_scan())
+    count_ip = 0
 
     while True:
         # Actualizar la interfaz cada segundo
@@ -202,7 +210,8 @@ def start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
             st.markdown('<div class="flex-container">', unsafe_allow_html=True)
             for device in st.session_state.data:
                 ip = device['IP']
-                unique_key = f"{ip}_{device['id']}"
+                count_ip += 1
+                unique_key = f"{device['unique_id']}_{count_ip}"
                 st.markdown(f"""
                 <div class="flex-item">
                     <h4>{ip}</h4>
@@ -210,8 +219,8 @@ def start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
                     <p><strong>Hostname:</strong> {device['Hostname']}</p>
                     <p><strong>Puertos Abiertos:</strong> {device['Puertos Abiertos']}</p>
                     """, unsafe_allow_html=True)
-                if st.button("Validar IP", key=unique_key, on_click=validate_ip, args=(ip,)):
-                    pass
+                if st.button("Validar IP", key=unique_key):
+                    validate_ip(ip)
                 st.markdown("</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
         loop.run_until_complete(asyncio.sleep(1))
