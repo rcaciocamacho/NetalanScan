@@ -47,7 +47,6 @@ def send_gotify_notification(title, message):
         try:
             response = requests.post(url, json=data, headers=headers)
             response.raise_for_status()
-            st.success("Notificación enviada a Gotify")
         except requests.RequestException as e:
             st.error(f"Error al enviar notificación a Gotify: {e}")
     else:
@@ -74,12 +73,18 @@ def add_ip_to_csv(ip):
 async def ping_ip(ip, total_ips):
     try:
         await aioping.ping(str(ip), timeout=0.5)
+        if ip not in st.session_state.devices:
+            unique_id = str(uuid.uuid4())
+            st.session_state.devices.add(ip)
+            st.session_state.data.append({
+                'IP': str(ip),
+                'MAC': 'Pendiente',
+                'Hostname': 'Pendiente',
+                'Puertos Abiertos': 'Pendiente',
+                'unique_id': unique_id
+            })
         st.session_state.ip_count += 1
         st.session_state.progress = st.session_state.ip_count / total_ips
-        unique_id = str(uuid.uuid4())
-        if ip not in st.session_state.devices:
-            st.session_state.data.append({'IP': str(ip), 'MAC': 'Pendiente', 'Hostname': 'Pendiente', 'Puertos Abiertos': 'Pendiente', 'unique_id': unique_id})
-            st.session_state.devices.add(ip)
         return str(ip)
     except TimeoutError:
         return None
@@ -88,13 +93,8 @@ async def scan_network(ip_range):
     ip_network = ipaddress.ip_network(ip_range)
     total_ips = ip_network.num_addresses - 2  # Excluir la dirección de red y broadcast
 
-    st.session_state.progress = 0
-    st.session_state.ip_count = 0
-    st.session_state.data = []
-
     tasks = [ping_ip(ip, total_ips) for ip in ip_network.hosts()]
     results = await asyncio.gather(*tasks)
-
     devices = [{'ip': ip} for ip in results if ip is not None]
     return devices
 
@@ -128,7 +128,7 @@ async def get_mac_address(ip):
 
 async def periodic_scan():
     ip_range = get_local_ip_range()
-    while True:
+    while st.session_state.scan_task:
         devices = await scan_network(ip_range)
         current_devices = set(device['ip'] for device in devices)
         
@@ -138,40 +138,30 @@ async def periodic_scan():
                 alert_message = f"Nueva IP detectada: {ip} en {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 st.session_state.alerts.append(alert_message)
                 send_gotify_notification("Nueva IP Detectada", alert_message)
-        
-        st.session_state.devices = current_devices
 
         tasks = [asyncio.create_task(get_device_info(device['ip'])) for device in devices]
         mac_tasks = [asyncio.create_task(get_mac_address(device['ip'])) for device in devices]
-        
+
         infos = await asyncio.gather(*tasks)
         macs = await asyncio.gather(*mac_tasks)
 
-        data = []
         for idx, (device, (hostname, open_ports), mac) in enumerate(zip(devices, infos, macs)):
-            unique_id = str(uuid.uuid4())
-            if device['ip'] not in st.session_state.devices:
-                data.append({
-                    'IP': device['ip'],
-                    'MAC': mac,
-                    'Hostname': hostname,
-                    'Puertos Abiertos': ', '.join(map(str, open_ports)) if open_ports else 'Ninguno',
-                    'unique_id': f"{unique_id}_{idx}"
-                })
-                st.session_state.devices.add(device['ip'])
-        
-        st.session_state.data.extend(data)
+            for data in st.session_state.data:
+                if data['IP'] == device['ip']:
+                    data['MAC'] = mac
+                    data['Hostname'] = hostname
+                    data['Puertos Abiertos'] = ', '.join(map(str, open_ports)) if open_ports else 'Ninguno'
         
         await asyncio.sleep(300)  # Esperar 5 minutos
 
-def start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
+def start_scan():
     load_valid_ips()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(periodic_scan())
-    count_ip = 0
+    count_ip = 0 
 
-    while True:
+    while st.session_state.scan_task:
         # Actualizar la interfaz cada segundo
         progress_bar.progress(st.session_state.progress)
         ip_count_placeholder.text(f"IPs encontradas: {st.session_state.ip_count}")
@@ -208,9 +198,9 @@ def start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder):
             """, unsafe_allow_html=True)
 
             st.markdown('<div class="flex-container">', unsafe_allow_html=True)
-            for device in st.session_state.data:
+            for idx, device in enumerate(st.session_state.data):
                 ip = device['IP']
-                count_ip += 1
+                count_ip += 1 
                 unique_key = f"{device['unique_id']}_{count_ip}"
                 st.markdown(f"""
                 <div class="flex-item">
@@ -244,7 +234,7 @@ def main():
     if st.button("Iniciar Escaneo"):
         if st.session_state.scan_task is None:
             st.session_state.scan_task = True
-            start_scan(progress_bar, ip_count_placeholder, ip_list_placeholder)
+            start_scan()
             st.success("Escaneo iniciado.")
             send_gotify_notification("NetalanScan", f"Iniciando escaneo!! DateTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
